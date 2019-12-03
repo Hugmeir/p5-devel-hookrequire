@@ -16,50 +16,6 @@ static bool hooking_enabled = FALSE;
 static OP* (*old_pp_require)(pTHX) = NULL;
 
 /* after hooks: */
-static int
-after_require_magic_free(pTHX_ SV *file_required, MAGIC *mg)
-{
-    AV *after_hooks_av = MUTABLE_AV(SvRV(after_hooks));
-    IV num_hooks        = av_len(after_hooks_av) + 1;
-    IV i                = 0;
-    SV *file_to_require = NULL;
-    PERL_UNUSED_ARG(mg);
-
-    for ( i = 0; i < num_hooks; i++ ) {
-        SV* callback = (SV*)*av_fetch(after_hooks_av, i, 0);
-        dSP;
-        ENTER;
-        SAVETMPS;
-
-        PUSHMARK(SP);
-        XPUSHs(sv_2mortal(newSVsv(file_required)));
-        PUTBACK;
-
-        int count = call_sv(callback, G_DISCARD|G_VOID);
-        SPAGAIN;
-        if ( count != 0 ) {
-            warn("Devel::HookRequire: 'after' callback returned a value, will ignore");
-        }
-        PUTBACK;
-        FREETMPS;
-        LEAVE;
-    }
-
-    return 1; /* ??? */
-}
-
-static MGVTBL after_hook_vtbl = { NULL /* get */, NULL, /* set */ NULL, /* len */ NULL, /* clear */ &after_require_magic_free,
-#ifdef MGf_COPY
-  NULL, /* copy */
-#endif
-#ifdef MGf_DUP
-  NULL, /* dup */
-#endif
-#ifdef MGf_LOCAL
-  NULL /* local */
-#endif
-};
-
 static void
 S_invoke_after_hooks(pTHX_ SV *file_required)
 {
@@ -71,7 +27,7 @@ S_invoke_after_hooks(pTHX_ SV *file_required)
     for ( i = 0; i < num_hooks; i++ ) {
         SV* callback = (SV*)*av_fetch(after_hooks_av, i, 0);
         dSP;
-        ENTER;
+        ENTER_with_name("Devel::HookRequire::after_hooks");
         SAVETMPS;
 
         PUSHMARK(SP);
@@ -85,9 +41,10 @@ S_invoke_after_hooks(pTHX_ SV *file_required)
         }
         PUTBACK;
         FREETMPS;
-        LEAVE;
+        LEAVE_with_name("Devel::HookRequire::after_hooks");
     }
 
+    // Only you can pretend memory leaks:
     SvREFCNT_dec(file_required);
     return;
 }
@@ -103,17 +60,7 @@ S_prepare_after_hooks(pTHX_ SV* initial_file)
     if ( num_hooks <= 0 )
         return; /* No hooks, nothing to do */
 
-    /* Well... Here's some fun stuff.  We want to run this after the require.
-     * However, require may throw an exception and die.  So we instead go the
-     * long way:  We create an object with a destructor, and the destructor
-     * is what invokes the after hooks.
-     */
-
-    /*
-    magic_sv = newSVsv(initial_file);
-    mg = sv_magicext(magic_sv, (SV*)NULL, PERL_MAGIC_ext, &after_hook_vtbl, (const char *)NULL, 0);
-    sv_2mortal(magic_sv);
-    */
+    /* This function will be called at the end of this scope: */
     SAVEDESTRUCTOR_X(S_invoke_after_hooks, newSVsv(initial_file));
 }
 
@@ -332,22 +279,31 @@ S_pp_hooked_require(pTHX)
         return CALL_FPTR(old_pp_require)(aTHX);
 
     {
-        /* TODO: we need a scope, otherwise after hooks won't kick in properly, e.g
-         * require foo, say "bar";
-         * Where the hook will fire after "bar"
+        /* TODO: this segfaults and/or causes things to not compile -- once this is fixed
+         * this module is more or less finished
          */
-        //ENTER;
-        //SAVETMPS;
+        /* We need a scope, since after hooks want to run 'after require, before the next statement',
+         * and exception hooks need to localize $SIG{__DIE__}.
+         * Consider:
+         *      require foo, say "bar";
+         * The 'after' hook MUST fire before 'say "bar"', which means that
+         * internally the code above must be invoked as
+         *      do { require foo }, say "bar"
+         */
+        ENTER_with_name("Devel::HookRequire");
         handle_require_hook();
         next = CALL_FPTR(old_pp_require)(aTHX);
-        //FREETMPS;
-        //LEAVE;
+        /* TODO: segfault here: something has popped too many scopes??? */
+        LEAVE_with_name("Devel::HookedRequire");
     }
     return next;
 }
 
-/* Support for the die hook.  PL_diehook is itself magical, so we won't use
- * a vtable there and instead use a destructor:
+/* Support for the die hook.
+ * We need to free the two variables we put inside xs_closure.
+ * PL_diehook is itself magical, so we won't use
+ * a vtable there and instead use a destructor, and we cannot use a C-level
+ * function as the closure may be freed before we get to it.
  * */
 
 MODULE = Devel::HookRequire::die_hook             PACKAGE = Devel::HookRequire::die_hook

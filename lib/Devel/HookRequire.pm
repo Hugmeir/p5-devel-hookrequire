@@ -1,14 +1,11 @@
 package Devel::HookRequire;
-use strict;
-use warnings;
-
-use constant DEBUG => $ENV{DEBUG_ALL} // $ENV{DEBUG_Devel_HookRequire};
+use DynaLoader;
+sub DEBUG () { $ENV{DEBUG_ALL} // $ENV{DEBUG_Devel_HookRequire} }
 
 our $VERSION = '0.01';
+our @ISA     = 'DynaLoader';
 
-use XSLoader ();
-
-XSLoader::load(__PACKAGE__);
+__PACKAGE__->bootstrap;
 
 =begin
 sub Devel::HookRequire::execute_die_hooks {
